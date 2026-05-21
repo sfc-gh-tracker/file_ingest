@@ -33,6 +33,66 @@ When you query the Cortex Search service, you pass a `user_emails` filter so res
 
 ---
 
+## Understanding How ACLs Work (The Trust Model)
+
+This is important to understand before configuring anything. The ACL mechanism is **application-level filtering** — it is NOT SAML integration, Snowflake role mapping, or automatic enforcement.
+
+### What Happens at Ingestion Time
+
+```
+SharePoint                              Snowflake (DOCS_CHUNKS table)
+─────────                              ─────────────────────────────
+Document "policy.pdf"                   Row for "policy.pdf"
+  Permissions:                            USER_EMAILS: ["jane@contoso.com",
+    - Jane (direct access)                              "bob@contoso.com",
+    - "Engineering" group                               "alice@contoso.com"]
+        - Bob                             USER_IDS:    ["guid-jane", "guid-bob",
+        - Alice                                         "guid-alice"]
+```
+
+The connector:
+1. Reads each document's SharePoint permissions (which users and groups are assigned)
+2. Calls Microsoft Graph API to expand groups into individual members (`GroupMember.Read.All`)
+3. Calls Microsoft Graph API to resolve user GUIDs into email addresses (`User.ReadBasic.All`)
+4. Stores the **flattened** list of user emails and IDs as array columns alongside each document chunk
+
+### What Happens at Query Time
+
+```
+User logs into your app (via Entra SSO, SAML, whatever you use)
+        │
+        ▼
+Your app knows the user's email (e.g., from the session/token)
+        │
+        ▼
+Your app passes that email as a filter to Cortex Search
+        │
+        ▼
+Cortex Search returns only chunks where user_emails array contains that email
+```
+
+The `@contains` filter checks: "is this email present in the `user_emails` array for this chunk?" If yes, the chunk is returned. If no, it's excluded.
+
+### What This Is NOT
+
+| Common Misconception | Reality |
+|---|---|
+| Snowflake roles mapped to Entra groups | No. The ACL is just data in an array column — no Snowflake RBAC integration. |
+| SAML/SSO enforcement at the Snowflake layer | No. There is no identity federation between Entra and Snowflake for search results. |
+| Automatically enforced by Snowflake | No. Anyone with USAGE on the search service can query without a filter and see everything. Your application must pass the filter. |
+| Real-time permission sync | No. Permissions sync via CDC — there is a small delay (seconds to minutes) between a SharePoint permission change and the ACL array being updated in Snowflake. |
+
+### The Security Boundary
+
+**Your application is the enforcement layer**, not Snowflake. Snowflake faithfully stores the ACL data and Cortex Search efficiently applies the filter, but it is the calling code that decides which email to filter on.
+
+This means:
+- An admin querying directly in a SQL worksheet (without a filter) sees all documents
+- Your app must authenticate the user independently and inject the correct email into the filter
+- If you need Snowflake-level enforcement, you would wrap the search service call in a stored procedure or UDF that injects the filter based on `CURRENT_USER()` email mapping
+
+---
+
 ## Part 1: Microsoft Entra ID Setup
 
 Before touching Snowflake, you need an App Registration in Microsoft Entra ID (formerly Azure AD). This is how the connector authenticates to SharePoint and resolves permissions.
