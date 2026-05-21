@@ -243,18 +243,25 @@ nipyapi --profile tracker_default_spcs1runtime1 ci configure_inherited_params \
     "Destination Schema": "CORTEX",
     "Snowflake Role": "OPENFLOWRUNTIMEROLE_SPCS1_RUNTIME1",
     "Snowflake Warehouse": "SI_DEMO",
-    "Snowflake Authentication Strategy": "SNOWFLAKE_SESSION_TOKEN",
+    "Snowflake Authentication Strategy": "SNOWFLAKE_MANAGED_TOKEN",
+    "Snowflake Username": "",
+    "Snowflake Account Identifier": "",
     "File Extensions To Ingest": "pdf,docx,pptx,xlsx",
     "Sharepoint Document Library Name": "Shared Documents",
-    "Sharepoint Source Folder": "/"
+    "Sharepoint Source Folder": "/",
+    "Sharepoint Site Groups Enabled": "true",
+    "OCR Mode": "LAYOUT",
+    "Snowflake Cortex Search Service User Role": "CORTEX_SEARCH_READER"
   }'
 ```
 
 > **Important notes:**
-> - `Snowflake Authentication Strategy` = `SNOWFLAKE_SESSION_TOKEN` for SPCS
-> - `Snowflake Username` and `Snowflake Account Identifier` must be **blank** for SPCS
+> - `Snowflake Authentication Strategy` = `SNOWFLAKE_MANAGED_TOKEN` for Snowflake (SPCS) Deployments
+> - `Snowflake Username` and `Snowflake Account Identifier` must be **blank** (empty string) for SPCS
 > - Certificate/Private Key must include full PEM headers (`-----BEGIN CERTIFICATE-----` etc.)
 > - Private key must be **unencrypted**
+> - `OCR Mode`: `LAYOUT` preserves table structures as Markdown; `OCR` extracts raw text only
+> - `Snowflake Cortex Search Service User Role`: Role granted USAGE on the Cortex Search service
 
 ---
 
@@ -316,7 +323,7 @@ nipyapi --profile tracker_default_spcs1runtime1 ci get_status \
 Wait a few minutes for initial ingestion, then check:
 
 ```sql
--- Check document chunks
+-- Check document chunks (connector creates DOCS_CHUNKS in the destination schema)
 SELECT COUNT(*) FROM SHAREPOINT_DEMO.CORTEX.DOCS_CHUNKS;
 
 -- Preview data with ACL columns
@@ -332,8 +339,10 @@ LIMIT 10;
 
 ### Verify Cortex Search Service exists
 
+The connector creates the search service in a schema named `cortex` (lowercase):
+
 ```sql
-SHOW CORTEX SEARCH SERVICES IN SCHEMA SHAREPOINT_DEMO.CORTEX;
+SHOW CORTEX SEARCH SERVICES IN SCHEMA SHAREPOINT_DEMO.cortex;
 ```
 
 ---
@@ -345,16 +354,18 @@ SHOW CORTEX SEARCH SERVICES IN SCHEMA SHAREPOINT_DEMO.CORTEX;
 ```sql
 SELECT PARSE_JSON(
   SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    'SHAREPOINT_DEMO.CORTEX.SEARCH_SERVICE',
+    'SHAREPOINT_DEMO.cortex.search_service',
     '{
       "query": "What is the vacation policy?",
-      "columns": ["chunk", "web_url", "full_name"],
+      "columns": ["chunk", "web_url", "full_name", "user_emails"],
       "filter": {"@contains": {"user_emails": "jane.doe@contoso.com"}},
       "limit": 5
     }'
   )
 )['results'] AS results;
 ```
+
+> **Note:** The connector creates the Cortex Search service as `search_service` in a schema named `cortex` (case-sensitive, lowercase). The fully-qualified reference is `SHAREPOINT_DEMO.cortex.search_service`.
 
 ### Python Query (with ACL filter)
 
@@ -370,13 +381,13 @@ root = Root(session)
 
 search_service = (root
     .databases["SHAREPOINT_DEMO"]
-    .schemas["CORTEX"]
-    .cortex_search_services["SEARCH_SERVICE"]
+    .schemas["cortex"]
+    .cortex_search_services["search_service"]
 )
 
 results = search_service.search(
     query="What is the vacation policy?",
-    columns=["chunk", "web_url", "full_name"],
+    columns=["chunk", "web_url", "full_name", "user_emails"],
     filter={"@contains": {"user_emails": "jane.doe@contoso.com"}},
     limit=5
 )
@@ -389,7 +400,7 @@ print(results.to_json())
 ```sql
 SELECT PARSE_JSON(
   SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-    'SHAREPOINT_DEMO.CORTEX.SEARCH_SERVICE',
+    'SHAREPOINT_DEMO.cortex.search_service',
     '{
       "query": "quarterly financial report",
       "columns": ["chunk", "web_url", "full_name"],
@@ -411,7 +422,7 @@ CREATE ROLE IF NOT EXISTS CORTEX_SEARCH_READER;
 -- Grant necessary permissions
 GRANT USAGE ON DATABASE SHAREPOINT_DEMO TO ROLE CORTEX_SEARCH_READER;
 GRANT USAGE ON SCHEMA SHAREPOINT_DEMO.CORTEX TO ROLE CORTEX_SEARCH_READER;
-GRANT USAGE ON CORTEX SEARCH SERVICE SHAREPOINT_DEMO.CORTEX.SEARCH_SERVICE TO ROLE CORTEX_SEARCH_READER;
+GRANT USAGE ON CORTEX SEARCH SERVICE SHAREPOINT_DEMO.cortex.search_service TO ROLE CORTEX_SEARCH_READER;
 
 -- Assign to users
 GRANT ROLE CORTEX_SEARCH_READER TO USER <username>;
@@ -453,11 +464,11 @@ LIMIT 50;
 | Item | Value |
 |------|-------|
 | Connector Flow | `unstructured-sharepoint-cdc` |
-| Destination Table | `SHAREPOINT_DEMO.CORTEX.DOCS_CHUNKS` |
-| Cortex Search Service | `SHAREPOINT_DEMO.CORTEX.SEARCH_SERVICE` |
+| Destination Table | `SHAREPOINT_DEMO.CORTEX.DOCS_CHUNKS` (chunks + ACLs) |
+| Cortex Search Service | `SHAREPOINT_DEMO.cortex.search_service` |
 | ACL Columns | `user_ids` (ARRAY), `user_emails` (ARRAY) |
 | Filter Syntax | `{"@contains": {"user_emails": "user@domain.com"}}` |
-| Auth Strategy (SPCS) | `SNOWFLAKE_SESSION_TOKEN` |
+| Auth Strategy (SPCS) | `SNOWFLAKE_MANAGED_TOKEN` |
 | Runtime Role | `OPENFLOWRUNTIMEROLE_SPCS1_RUNTIME1` |
 | Runtime URL | `https://of--sfsenorthamerica-demo-tracker.snowflakecomputing.app/spcs1runtime1/nifi-api` |
 
